@@ -16,7 +16,7 @@ class TestFtest2Utilities(unittest.TestCase):
         self.assertEqual(ftest2._extract_result_url({"url": "c"}), "c")
         self.assertIsNone(ftest2._extract_result_url({"data": {}, "response": {}}))
 
-    def test_calculate_white_ratio_counts_pixels_above_threshold(self):
+    def test_calculate_white_ratio_returns_correct_percentage(self):
         with tempfile.TemporaryDirectory() as td:
             img_path = Path(td) / "ratio.png"
             img = Image.new("L", (2, 2))
@@ -24,7 +24,7 @@ class TestFtest2Utilities(unittest.TestCase):
             img.save(img_path)
             self.assertAlmostEqual(ftest2.calculate_white_ratio(img_path), 0.75)
 
-    def test_svg_has_paths_detects_drawables_and_fallback_text_scan(self):
+    def test_svg_has_paths_detects_drawables(self):
         with tempfile.TemporaryDirectory() as td:
             with_paths = Path(td) / "with_paths.svg"
             with_paths.write_text('<svg><rect width="10" height="10"/></svg>', encoding="utf-8")
@@ -34,6 +34,8 @@ class TestFtest2Utilities(unittest.TestCase):
             without_paths.write_text("<svg><g></g></svg>", encoding="utf-8")
             self.assertFalse(ftest2.svg_has_paths(without_paths))
 
+    def test_svg_has_paths_handles_malformed_xml_fallback(self):
+        with tempfile.TemporaryDirectory() as td:
             malformed = Path(td) / "malformed.svg"
             malformed.write_text("<svg><path d='M0 0L1 1'></svg", encoding="utf-8")
             self.assertTrue(ftest2.svg_has_paths(malformed))
