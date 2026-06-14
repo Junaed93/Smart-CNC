@@ -36,18 +36,18 @@ STROKE_WIDTH_PX = "1.2"
 STROKE_LINECAP = "round"
 STROKE_LINEJOIN = "round"
 
+# Set potrace executable path relative to this script
+POTRACE_EXE = str(Path(__file__).parent / "potrace-1.16.win64" / "potrace.exe")
+
+POTRACE_TURDSIZE = "10"
+POTRACE_ALPHAMAX = "1"
+POTRACE_OPTTOL = "0.2"
+
 # Hatching shading settings (balanced for 0.5mm pen)
 HATCH_LINE_STEP_PX = 7
 HATCH_THICKNESS_PX = 2
 HATCH_ANGLE_DEG = 45
 HATCH_CONTRAST = 1.7
-
-# Laser mode settings
-LASER_ON = "M3 S1000"
-LASER_OFF = "M5"
-LASER_DELAY = 0.1
-LASER_FEED_TRAVEL = 15000
-LASER_FEED_DRAW = 5000
 # ------------------------------------------
 
 
@@ -222,12 +222,40 @@ def calculate_white_ratio(image_path: Path, threshold: int = WHITE_THRESHOLD) ->
     return white_count / total
 
 
-def _cleanup_trace_files(base: Path) -> None:
-    for p in base.parent.glob(f"{base.name}_trace.*"):
-        try:
-            p.unlink()
-        except OSError:
-            pass
+def ensure_potrace_available(potrace_exe: str = POTRACE_EXE) -> None:
+    p = Path(potrace_exe)
+    if not p.exists():
+        raise RuntimeError(
+            "Potrace not found.\n"
+            "Set POTRACE_EXE to your potrace.exe full path.\n"
+            f"Current: {potrace_exe}"
+        )
+    subprocess.run([potrace_exe, "-v"], check=True, capture_output=True, text=True)
+
+
+def png_to_bmp_for_potrace(input_png: Path, output_bmp: Path) -> Path:
+    im = Image.open(input_png).convert("L")
+    im = im.point(lambda p: 255 if p > 127 else 0, mode="L")
+    im = im.convert("1")
+    im.save(output_bmp, format="BMP")
+    return output_bmp
+
+
+def potrace_trace_to_svg(input_bmp: Path, output_svg: Path) -> Path:
+    cmd = [
+        POTRACE_EXE,
+        input_bmp.as_posix(),
+        "-s",
+        "-o", output_svg.as_posix(),
+        "--turdsize", POTRACE_TURDSIZE,
+        "--alphamax", POTRACE_ALPHAMAX,
+        "--opttolerance", POTRACE_OPTTOL,
+    ]
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+    if not output_svg.exists() or output_svg.stat().st_size == 0:
+        raise RuntimeError("Potrace said OK but SVG not created / empty.")
+    return output_svg
 
 
 def svg_has_paths(svg_path: Path) -> bool:
@@ -324,43 +352,13 @@ def clean_svg_for_pen_plotter(
 
 
 def trace_png_to_svg_auto(line_png: Path, svg_path: Path, base: Path) -> None:
-    import cv2
-
-    img = cv2.imread(str(line_png), cv2.IMREAD_GRAYSCALE)
-    if img is None:
-        raise RuntimeError(f"Could not load image for tracing: {line_png}")
-
-    _, binary = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY_INV)
-    contours, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-
-    min_area = 3
-    contours = [c for c in contours if cv2.contourArea(c) >= min_area]
-
-    if not contours:
-        raise RuntimeError("No contours found in image (image may be blank).")
-
-    h, w = img.shape
-    lines = [
-        '<?xml version="1.0" encoding="UTF-8"?>',
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">',
-    ]
-
-    for contour in contours:
-        pts = contour.reshape(-1, 2).astype(float)
-        if len(pts) < 2:
-            continue
-
-        d = f"M {pts[0][0]:.1f},{pts[0][1]:.1f}"
-        for p in pts[1:]:
-            d += f" L {p[0]:.1f},{p[1]:.1f}"
-        d += " Z"
-        lines.append(f'  <path d="{d}"/>')
-
-    lines.append('</svg>')
-    svg_path.write_text("\n".join(lines), encoding="utf-8")
+    ensure_potrace_available()
+    bmp_path = base.parent / f"{base.name}_trace.bmp"
+    png_to_bmp_for_potrace(line_png, bmp_path)
+    potrace_trace_to_svg(bmp_path, svg_path)
 
     if not svg_has_paths(svg_path):
-        raise RuntimeError("No vector paths in traced SVG.")
+        raise RuntimeError("Potrace produced no vector paths.")
 
 
 # ======================================================================
@@ -542,171 +540,41 @@ def build_gcode(paths: List[SvgPath]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def build_laser_gcode(paths: List[SvgPath]) -> str:
-    scale, dx, dy = fit_to_machine(paths)
-
-    lines: List[str] = []
-    lines.append("G90")
-    lines.append("G21")
-    lines.append(LASER_OFF)
-    lines.append(f"G4 P{fmt(LASER_DELAY)}")
-
-    laser_on = False
-    last: Tuple[float, float] | None = None
-
-    def force_laser_off():
-        nonlocal laser_on
-        lines.append(LASER_OFF)
-        lines.append(f"G4 P{fmt(LASER_DELAY)}")
-        laser_on = False
-
-    def force_laser_on():
-        nonlocal laser_on
-        if not laser_on:
-            lines.append(LASER_ON)
-            lines.append(f"G4 P{fmt(LASER_DELAY)}")
-            laser_on = True
-
-    for p in paths:
-        subpaths = p.continuous_subpaths()
-        for sp in subpaths:
-            pts = sample_path(sp, scale, dx, dy)
-            if len(pts) < 2:
-                continue
-
-            start = pts[0]
-            force_laser_off()
-            if last is None or dist(start, last) > 0.02:
-                lines.append(f"G0 X{fmt(start[0])} Y{fmt(start[1])}")
-                last = start
-
-            force_laser_on()
-            lines.append(f"G1 F{fmt(LASER_FEED_DRAW)}")
-            for (x, y) in pts[1:]:
-                if last and dist((x, y), last) < 0.02:
-                    continue
-                lines.append(f"G1 X{fmt(x)} Y{fmt(y)}")
-                last = (x, y)
-
-            force_laser_off()
-
-    if RETURN_TO_ZERO:
-        force_laser_off()
-        lines.append("G0 X0 Y0")
-
-    return "\n".join(lines) + "\n"
-
-
 def open_in_lasergrbl(gcode_path: Path) -> None:
-    if sys.platform == "win32":
-        subprocess.run(
-            "taskkill /F /IM LaserGRBL.exe",
-            shell=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-        time.sleep(0.5)
+    subprocess.run(
+        "taskkill /F /IM LaserGRBL.exe",
+        shell=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
+    time.sleep(0.5)
+    
+    # Try common paths for LaserGRBL
+    common_paths = [
+        r"C:\Program Files (x86)\LaserGRBL\LaserGRBL.exe",
+        r"C:\Program Files\LaserGRBL\LaserGRBL.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\LaserGRBL\LaserGRBL.exe")
+    ]
+    
+    lasergrbl_exe = None
+    for p in common_paths:
+        if os.path.exists(p):
+            lasergrbl_exe = p
+            break
+            
+    if lasergrbl_exe:
+        # Launch LaserGRBL explicitly with the gcode file
+        subprocess.Popen([lasergrbl_exe, str(gcode_path)])
+        
 
-        common_paths = [
-            r"C:\Program Files (x86)\LaserGRBL\LaserGRBL.exe",
-            r"C:\Program Files\LaserGRBL\LaserGRBL.exe",
-            os.path.expandvars(r"%LOCALAPPDATA%\Programs\LaserGRBL\LaserGRBL.exe")
-        ]
-
-        lasergrbl_exe = None
-        for p in common_paths:
-            if os.path.exists(p):
-                lasergrbl_exe = p
-                break
-
-        if lasergrbl_exe:
-            subprocess.Popen([lasergrbl_exe, str(gcode_path)])
-        else:
-            os.startfile(str(gcode_path))
+            
     else:
-        log(f"[LaserGRBL only runs on Windows. G-code saved at: {gcode_path}")
+        # Fallback to os.startfile if not found
+        os.startfile(str(gcode_path))
 
 
 def process_one(input_path: Path, mode: int) -> dict:
     base = input_path.with_suffix("")
-    result = {"input": str(input_path), "mode": mode, "gcode": None, "success": False, "error": None}
-
-    # --- Mode 3 (Laser) with SVG input: direct to laser G-code ---
-    if mode == 3 and input_path.suffix.lower() in ('.svg', '.svgz'):
-        clean_svg_path = base.parent / f"{base.name}_clean_m3.svg"
-        gcode_path = base.parent / f"{base.name}_m3.gcode"
-        try:
-            if gcode_path.exists() and gcode_path.stat().st_size > 0:
-                result["gcode"] = str(gcode_path)
-                log(f"G-code already exists (mode={mode}), opening: {gcode_path}")
-                open_in_lasergrbl(gcode_path)
-                result["success"] = True
-                return result
-
-            log("[1/3] Cleaning SVG for laser")
-            clean_svg_for_pen_plotter(input_path, clean_svg_path)
-
-            log("[2/3] SVG -> Laser G-code")
-            paths = get_paths(clean_svg_path)
-            gcode = build_laser_gcode(paths)
-            gcode_path.write_text(gcode, encoding="utf-8")
-            result["gcode"] = str(gcode_path)
-
-            open_in_lasergrbl(gcode_path)
-            result["success"] = True
-            return result
-        except Exception as e:
-            result["error"] = str(e)
-            return result
-
-    # --- Mode 3 (Laser) with raster image: outline only, no RemoveBG ---
-    if mode == 3:
-        line_path = base.parent / f"{base.name}_line_m3.png"
-        svg_path = base.parent / f"{base.name}_m3.svg"
-        clean_svg_path = base.parent / f"{base.name}_clean_m3.svg"
-        gcode_path = base.parent / f"{base.name}_m3.gcode"
-
-        try:
-            if gcode_path.exists() and gcode_path.stat().st_size > 0:
-                result["gcode"] = str(gcode_path)
-                log(f"G-code already exists (mode={mode}), opening: {gcode_path}")
-                open_in_lasergrbl(gcode_path)
-                result["success"] = True
-                return result
-
-            # Check 1:1 aspect ratio
-            im = Image.open(input_path)
-            w, h = im.size
-            if h > 0:
-                ratio = w / h
-                if abs(ratio - 1.0) > 0.05:
-                    raise RuntimeError(
-                        f"Laser mode requires a square image (1:1 ratio). "
-                        f"Got {w}x{h} (ratio {ratio:.2f})."
-                    )
-            log("[1/4] 1:1 ratio OK, extracting outline")
-            make_line_ready_bw(input_path, line_path)
-
-            log("[2/4] Potrace -> SVG")
-            trace_png_to_svg_auto(line_path, svg_path, base)
-
-            log("[3/4] SVG cleanup")
-            clean_svg_for_pen_plotter(svg_path, clean_svg_path)
-
-            log("[4/4] SVG -> Laser G-code")
-            paths = get_paths(clean_svg_path)
-            gcode = build_laser_gcode(paths)
-            gcode_path.write_text(gcode, encoding="utf-8")
-            result["gcode"] = str(gcode_path)
-
-            open_in_lasergrbl(gcode_path)
-            result["success"] = True
-            return result
-        except Exception as e:
-            result["error"] = str(e)
-            return result
-
-    # --- Modes 1 & 2 (existing pipeline with RemoveBG) ---
     cutout_path = base.parent / f"{base.name}_cutout.png"
     white_path = base.parent / f"{base.name}_white.png"
 
@@ -720,6 +588,8 @@ def process_one(input_path: Path, mode: int) -> dict:
         svg_path = base.parent / f"{base.name}_m2.svg"
         clean_svg_path = base.parent / f"{base.name}_clean_m2.svg"
         gcode_path = base.parent / f"{base.name}_m2.gcode"
+
+    result = {"input": str(input_path), "mode": mode, "gcode": None, "success": False, "error": None}
 
     try:
         if gcode_path.exists() and gcode_path.stat().st_size > 0:
@@ -772,8 +642,8 @@ def process_one(input_path: Path, mode: int) -> dict:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", type=int, choices=[1, 2, 3], default=1, help="1=outline, 2=shading, 3=laser")
-    parser.add_argument("images", nargs="+", help="input image or SVG files")
+    parser.add_argument("--mode", type=int, choices=[1, 2], default=1, help="1=outline, 2=shading")
+    parser.add_argument("images", nargs="+", help="input image files")
 
     
     args = parser.parse_args(argv)

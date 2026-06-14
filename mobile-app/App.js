@@ -30,39 +30,11 @@ export default function App() {
   const [logs, setLogs] = useState('');
   const [svgContent, setSvgContent] = useState(null);
   const [gcodeContent, setGcodeContent] = useState(null);
-  const [ratioError, setRatioError] = useState('');
   
   // The IP is auto-detected from Expo, but we keep it in state so the user can edit it if needed.
   const [serverIp, setServerIp] = useState(defaultIp);
   
   const scrollViewRef = useRef(null);
-
-  const isSvg = (f) => f && (f.fileName?.endsWith('.svg') || f.uri?.endsWith('.svg'));
-  const isRaster = (f) => f && (f.mimeType?.startsWith('image/') || f.type?.startsWith('image/')) && !isSvg(f);
-
-  const checkSquareRatio = (file) => {
-    return new Promise((resolve) => {
-      if (!file || isSvg(file)) {
-        setRatioError('');
-        resolve(true);
-        return;
-      }
-      const { width, height } = file;
-      if (width && height) {
-        const ratio = width / height;
-        if (Math.abs(ratio - 1.0) > 0.05) {
-          setRatioError(`Laser mode requires a square image (1:1 ratio). Got ${width}×${height}.`);
-          resolve(false);
-        } else {
-          setRatioError('');
-          resolve(true);
-        }
-      } else {
-        setRatioError('');
-        resolve(true);
-      }
-    });
-  };
 
   const pickImage = async () => {
     let result = await ImagePicker.launchImageLibraryAsync({
@@ -72,12 +44,7 @@ export default function App() {
     });
 
     if (!result.canceled && result.assets && result.assets.length > 0) {
-      const picked = result.assets[0];
-      if (mode === 3 && isRaster(picked)) {
-        const ok = await checkSquareRatio(picked);
-        if (!ok) return;
-      }
-      setFile(picked);
+      setFile(result.assets[0]);
       setLogs('');
       setSvgContent(null);
       setGcodeContent(null);
@@ -94,8 +61,7 @@ export default function App() {
     // React Native FormData requires specific object structure for files
     const filename = file.uri.split('/').pop();
     const match = /\.(\w+)$/.exec(filename);
-    const ext = match ? match[1].toLowerCase() : '';
-    const type = ext === 'svg' ? 'image/svg+xml' : (match ? `image/${ext}` : `image`);
+    const type = match ? `image/${match[1]}` : `image`;
 
     formData.append('file', {
       uri: file.uri,
@@ -263,7 +229,7 @@ export default function App() {
             <View style={styles.modeContainer}>
               <TouchableOpacity 
                 style={[styles.modeCard, mode === 1 && styles.modeCardActive]} 
-                onPress={() => { setMode(1); setRatioError(''); }}
+                onPress={() => setMode(1)}
               >
                 <Text style={styles.modeIcon}>〰️</Text>
                 <Text style={styles.modeTitle}>Outline</Text>
@@ -271,34 +237,12 @@ export default function App() {
               
               <TouchableOpacity 
                 style={[styles.modeCard, mode === 2 && styles.modeCardActive]} 
-                onPress={() => { setMode(2); setRatioError(''); }}
+                onPress={() => setMode(2)}
               >
                 <Text style={styles.modeIcon}>▒</Text>
                 <Text style={styles.modeTitle}>Shading</Text>
               </TouchableOpacity>
-
-              <TouchableOpacity 
-                style={[styles.modeCard, mode === 3 && styles.modeCardActive]} 
-                onPress={() => { setMode(3); setRatioError(''); }}
-              >
-                <Text style={styles.modeIcon}>🔥</Text>
-                <Text style={styles.modeTitle}>Laser</Text>
-              </TouchableOpacity>
             </View>
-
-            {mode === 3 && (
-              <View style={styles.modeNote}>
-                <Text style={styles.modeNoteText}>
-                  Laser mode requires an SVG file or a square image (1:1 ratio).
-                </Text>
-              </View>
-            )}
-
-            {ratioError ? (
-              <View style={styles.errorNote}>
-                <Text style={styles.errorNoteText}>{ratioError}</Text>
-              </View>
-            ) : null}
 
             <TouchableOpacity 
               style={[styles.actionBtn, (!file || isProcessing) && styles.actionBtnDisabled]} 
@@ -308,7 +252,7 @@ export default function App() {
               {isProcessing ? (
                 <ActivityIndicator color="#ffffff" />
               ) : (
-                <Text style={styles.actionBtnText}>{mode === 3 ? 'Generate Laser G-Code ▶' : 'Generate G-Code ▶'}</Text>
+                <Text style={styles.actionBtnText}>Generate G-Code ▶</Text>
               )}
             </TouchableOpacity>
           </View>
@@ -507,32 +451,6 @@ const styles = StyleSheet.create({
   actionBtnDisabled: {
     backgroundColor: '#1e3a8a',
     opacity: 0.7,
-  },
-  modeNote: {
-    backgroundColor: 'rgba(245, 158, 11, 0.1)',
-    borderWidth: 1,
-    borderColor: 'rgba(245, 158, 11, 0.3)',
-    borderRadius: 8,
-    padding: 12,
-    marginBottom: 16,
-  },
-  modeNoteText: {
-    color: '#fbbf24',
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  errorNote: {
-    backgroundColor: 'rgba(239, 68, 68, 0.1)',
-    borderWidth: 1,
-    borderColor: 'rgba(239, 68, 68, 0.3)',
-    borderRadius: 8,
-    padding: 12,
-    marginBottom: 16,
-  },
-  errorNoteText: {
-    color: '#ef4444',
-    fontSize: 13,
-    lineHeight: 18,
   },
   actionBtnText: {
     color: '#ffffff',
